@@ -31,76 +31,185 @@ Routes should stay thin; persistence and rules live in services.
 
 ---
 
-## Milestone 2: Bug Reproduction (before any fixes)
+## Milestone 3: Root Cause Analyses
 
-Reproduction was done on the `main` branch (unfixed code) using pytest, direct service calls, and seed data. No fix code was written until each bug's behavior was confirmed.
-
-### Chosen bugs
-
-All five issues were reproduced. Minimum of three required; all five documented below.
+All five bugs fixed on branch `bugfix/mixtape`, one commit each. Each entry below was written immediately after fixing that bug.
 
 ---
 
-## Bug Fixes (5/5)
+### Issue #1 — My listening streak keeps resetting
 
-### Issue #1 — Listening streak keeps resetting
+**How I reproduced it**
 
-| Field | Detail |
-|-------|--------|
-| **Symptom** | Users who listen on consecutive days lose their streak when the second day is Sunday |
-| **How I reproduced it** | 1. Checked out `main` (buggy `streak_service.py`). 2. Ran `pytest tests/test_streaks.py::test_streak_increments_on_sunday -v`. 3. Test creates a user, calls `update_listening_streak(user, saturday)` → streak = 1, then `update_listening_streak(user, sunday)` → **expected 2, got 1**. 4. Confirmed the failure only happens when the second listen is on Sunday (`weekday() == 6`); Mon→Tue increments correctly (`test_streak_increments_on_consecutive_day` passes). |
-| **Root cause** | `update_listening_streak` had `today.weekday() != 6` on the consecutive-day branch, so Sunday listens fell through to the reset branch |
-| **Fix** | Removed the Sunday check; consecutive calendar days always increment regardless of weekday |
-| **Commit** | `fix: remove Sunday boundary that incorrectly resets listening streak` |
+1. Checked out unfixed `services/streak_service.py` from `main`.
+2. Ran `pytest tests/test_streaks.py::test_streak_increments_on_sunday -v`.
+3. Test calls `update_listening_streak(user, saturday)` → streak = 1, then `update_listening_streak(user, sunday)` → **expected 2, got 1**.
+4. Confirmed Mon→Tue still increments (`test_streak_increments_on_consecutive_day` passes) — failure is specific to Sunday as the second day.
+
+**How I found the root cause**
+
+1. README pointed to `streak_service.py` for Issue #1.
+2. Traced from symptom: streak resets → `routes/songs.py` `POST /listen` → `record_listening_event()` → `update_listening_streak()`.
+3. Read `update_listening_streak()` in `services/streak_service.py` lines 70–76.
+4. The consecutive-day branch was `elif days_since_last == 1 and today.weekday() != 6` — the extra `weekday() != 6` guard was the only path-specific to Sunday.
+5. Confident moment: when `days_since_last == 1` on Sunday, `weekday()` returns `6`, the condition is `False`, execution falls to `else` which sets `listening_streak = 1`.
+
+**The root cause**
+
+`datetime.weekday()` returns `6` for Sunday. The streak increment branch required `days_since_last == 1 and today.weekday() != 6`, so a user who listened yesterday (Saturday, `days_since_last == 1`) and listens again today (Sunday) failed the increment check and hit the reset branch instead. The code treated Sunday as a non-consecutive day even when only one calendar day had passed.
+
+**Fix and side-effect check**
+
+- **Change:** Removed `and today.weekday() != 6` so `days_since_last == 1` always increments.
+- **Why it works:** Streak logic now depends only on calendar-day gap, not weekday name.
+- **Side effects checked:** Ran full `tests/test_streaks.py` — new-user start, consecutive days, same-day no double-count, skipped-day reset, and Sunday increment all pass.
+- **Commit:** `d4cebf0` — `fix: remove Sunday boundary that incorrectly resets listening streak`
+
+---
 
 ### Issue #2 — Friends Listening Now shows people from yesterday
 
-| Field | Detail |
-|-------|--------|
-| **Symptom** | The "listening now" feed includes friends who listened hours ago, not just people listening right now |
-| **How I reproduced it** | 1. On `main`, ran `python seed_data.py` then called `get_friends_listening_now(nova.id)` (or used the seeded friendship graph manually). 2. Seed data creates recent events at 10–20 min ago **and** older events at 2–18 hours ago. 3. With the 24-hour `RECENT_THRESHOLD`, both appear in the feed. 4. Minimal repro without seed: created `nova` with friends `darius` (listened 15 min ago) and `simone` (listened 5 hours ago) → `get_friends_listening_now` returned **both** users; only `darius` should qualify for "listening now". |
-| **Root cause** | `RECENT_THRESHOLD` was `timedelta(hours=24)`, far too wide for a real-time "listening now" feature |
-| **Fix** | Changed threshold to `timedelta(minutes=30)` to match seed-data intent |
-| **Commit** | `fix: narrow Friends Listening Now window to exclude stale events` |
-| **Regression test** | `tests/test_feed.py::test_listening_now_excludes_stale_events` |
+**How I reproduced it**
 
-### Issue #3 — Same song appears twice (or more) in search
+1. On `main`, created `nova` with friends `darius` (listened 15 min ago) and `simone` (listened 5 hours ago).
+2. Called `get_friends_listening_now(nova.id)` → returned **both** friends.
+3. Confirmed with `python seed_data.py`: seed comments say events at 10–20 min should appear but events at 2–18 hours should not; with the 24-hour threshold, stale friends appeared.
 
-| Field | Detail |
-|-------|--------|
-| **Symptom** | Searching can return the same song multiple times — but only for songs with multiple tags |
-| **How I reproduced it** | 1. On `main`, created a song with **3 tags** (`rap`, `hip-hop`, `boom bap`) and one with **0 tags**. 2. Ran the search query from `search_songs` directly: `db.session.query(Song).outerjoin(song_tags, ...).filter(title ilike '%Crown Heights%')`. 3. Called `.count()` on that query → **3 rows** for the 3-tag song; same query for a no-tag song → **1 row**. 4. Duplicates are **conditional on tag count**: 0 tags = 1 row, 1 tag = 1 row, 3 tags = 3 SQL rows because `outerjoin(song_tags)` multiplies results per tag. 5. The existing pytest `test_search_no_duplicates_multi_tag_song` documents the expected vs buggy behavior. |
-| **Root cause** | `search_songs` uses `outerjoin(song_tags)` without deduplication; each tag association adds another row to the SQL result set |
-| **Fix** | Added `.distinct()` to the query before `.all()` |
-| **Commit** | `fix: deduplicate search results when songs have multiple tags` |
+**How I found the root cause**
 
-### Issue #4 — No notification when a friend rates your song
+1. README → `feed_service.py` for Issue #2.
+2. Traced: `GET /feed/<user_id>/listening-now` → `routes/feed.py` → `get_friends_listening_now()`.
+3. Read `RECENT_THRESHOLD = timedelta(hours=24)` and filter `ListeningEvent.listened_at >= cutoff`.
+4. Compared with `seed_data.py` lines 111–130 — "recent" events are minutes old; "older" events start at 2 hours ago, all within 24 hours.
+5. Confident moment: the threshold name says "listening **now**" but the window was a full day, so hours-old listens qualified.
 
-| Field | Detail |
-|-------|--------|
-| **Symptom** | Sharers get notified when a friend adds their song to a playlist, but not when a friend rates it |
-| **How I reproduced it** | 1. On `main`, compared `add_to_playlist()` (calls `create_notification` when `song.shared_by != added_by_user_id`) with `rate_song()` (saves rating, no notification call). 2. Minimal repro: created `nova` (sharer) and `darius` (rater), song owned by `nova`. 3. Called `rate_song(darius.id, song.id, 5)`. 4. Called `get_notifications(nova.id)` → **empty list** (0 notifications). 5. Seed data already includes a working `song_added_to_playlist` notification for `nova`, confirming notifications work — only the rating path is missing. |
-| **Root cause** | `rate_song()` saved the rating but never called `create_notification()`, unlike `add_to_playlist()` which notifies `song.shared_by` |
-| **Fix** | After commit, if `song.shared_by != user_id`, create a `song_rated` notification mirroring the playlist pattern |
-| **Commit** | `fix: notify song sharer when a friend rates their song` |
+**The root cause**
 
-### Issue #5 — Last song in a playlist never shows up
+`RECENT_THRESHOLD` was `timedelta(hours=24)`. The filter `listened_at >= now - 24 hours` included any friend who listened within the past day, including people who listened 5–18 hours ago. For a "listening now" feed, that window is far too wide and surfaces yesterday's activity alongside genuinely current listeners.
 
-| Field | Detail |
-|-------|--------|
-| **Symptom** | A playlist with N songs returns only N−1 in `GET /playlists/<id>/songs` |
-| **How I reproduced it** | 1. On `main`, ran `pytest tests/test_playlists.py::test_playlist_returns_all_songs -v`. 2. Test creates a playlist with 5 songs (`Track 1` … `Track 5`) at positions 1–5. 3. `get_playlist_songs(playlist_id)` returned **4 songs**; `Track 5` was missing. 4. `test_playlist_returns_songs_in_order` also fails — titles end at `Track 4`. |
-| **Root cause** | Return statement used `songs[:-1]`, slicing off the final element |
-| **Fix** | Return the full `songs` list without slicing |
-| **Commit** | `fix: return all playlist songs including the last entry` |
+**Fix and side-effect check**
+
+- **Change:** `RECENT_THRESHOLD = timedelta(minutes=30)` to align with seed-data intent (recent events at 10–20 min).
+- **Why it works:** Only events within the last 30 minutes pass the filter; 2+ hour old events are excluded.
+- **Side effects checked:** `get_activity_feed()` is a separate function with no recency filter — unchanged and still returns historical events. Added `tests/test_feed.py::test_listening_now_excludes_stale_events` as regression coverage.
+- **Commit:** `3a5b1ca` — `fix: narrow Friends Listening Now window to exclude stale events`
+
+---
+
+### Issue #3 — The same song keeps showing up twice in search
+
+**How I reproduced it**
+
+1. On `main`, created "Crown Heights Anthem" with 3 tags (`rap`, `hip-hop`, `boom bap`) and "Midnight Drive" with 0 tags.
+2. Ran the raw query from `search_songs`: `db.session.query(Song).outerjoin(song_tags, ...).filter(title ilike '%Crown Heights%')`.
+3. `.count()` returned **3** for the 3-tag song, **1** for the no-tag song — duplicates are conditional on tag count.
+4. `tests/test_search.py::test_search_no_duplicates_multi_tag_song` documents expected behavior (1 result, not 3).
+
+**How I found the root cause**
+
+1. README → `search_service.py` for Issue #3; hint said duplicates are conditional.
+2. Traced: `GET /songs/search?q=...` → `routes/songs.py` → `search_songs()`.
+3. Read the query: filters on `Song.title` / `Song.artist` but also `outerjoin(song_tags)` — the join is unnecessary for the filter and multiplies rows.
+4. Checked `models.py` `song_tags` association table — one row per tag per song.
+5. Confident moment: a song with N tags produces N joined rows in SQL; without deduplication the result set has one entry per tag.
+
+**The root cause**
+
+`search_songs()` joins `song_tags` via `outerjoin` even though the search filter only uses `Song.title` and `Song.artist`. Each tag association adds another row to the SQL result for the same `Song`. Songs with 0–1 tags return one row; songs with 3 tags return 3 rows for the same song. The bug is conditional — it only manifests for multi-tag songs.
+
+**Fix and side-effect check**
+
+- **Change:** Added `.distinct()` before `.all()` on the query.
+- **Why it works:** Collapses duplicate `Song` rows from the join into one result per song.
+- **Side effects checked:** Ran full `tests/test_search.py` — matching, no-match, and no-duplicate tests for 0-tag, 1-tag, and 3-tag songs all pass. `get_song()` is unaffected.
+- **Commit:** `c61497b` — `fix: deduplicate search results when songs have multiple tags`
+
+---
+
+### Issue #4 — Notified on playlist add but not on rating
+
+**How I reproduced it**
+
+1. On `main`, created `nova` (sharer) and `darius` (rater), song owned by `nova`.
+2. Called `rate_song(darius.id, song.id, 5)` then `get_notifications(nova.id)` → **empty list**.
+3. Seed data already has a working `song_added_to_playlist` notification for `nova`, proving the notification system works.
+
+**How I found the root cause**
+
+1. README → `notification_service.py`; hint said compare working notification pattern line-by-line.
+2. Traced rating path: `POST /songs/<id>/rate` → `routes/songs.py` → `rate_song()`.
+3. Traced playlist path: `routes/playlists.py` → `add_to_playlist()` in the same file.
+4. `add_to_playlist()` lines 64–70: after saving, checks `song.shared_by != added_by_user_id` and calls `create_notification()`.
+5. `rate_song()` lines 96–108: saves rating, commits, returns — **no notification call anywhere**.
+6. Confident moment: same file, same pattern needed, one code path has it and the other doesn't. Architectural omission, not a typo.
+
+**The root cause**
+
+`rate_song()` persisted the rating correctly but never called `create_notification()`. The playlist-add flow in the same service file already had the correct pattern: after the DB write, if the acting user is not the song sharer, notify `song.shared_by`. The rating flow was missing this entire notification step, so sharers never learned when a friend rated their song.
+
+**Fix and side-effect check**
+
+- **Change:** After `db.session.commit()`, added the same guard and `create_notification()` call with type `song_rated`.
+- **Why it works:** Mirrors the proven `add_to_playlist()` pattern in the same service.
+- **Side effects checked:** Self-ratings (`user_id == song.shared_by`) correctly skip notification. `get_notifications()` and `mark_as_read()` unchanged. Playlist notification path untouched.
+- **Commit:** `6b2192e` — `fix: notify song sharer when a friend rates their song`
+
+---
+
+### Issue #5 — The last song in a playlist never shows up
+
+**How I reproduced it**
+
+1. On `main`, ran `pytest tests/test_playlists.py::test_playlist_returns_all_songs -v`.
+2. Test seeds a playlist with 5 songs at positions 1–5.
+3. `get_playlist_songs()` returned **4 songs** — `Track 5` missing.
+4. `test_playlist_returns_songs_in_order` also failed (titles ended at `Track 4`).
+
+**How I found the root cause**
+
+1. README → `playlist_service.py` for Issue #5.
+2. Traced: `GET /playlists/<id>/songs` → `routes/playlists.py` → `get_playlist_songs()`.
+3. Read the function: query joins `playlist_entries`, orders by `position`, fetches all songs correctly.
+4. Line 66 (buggy): `return [song.to_dict() for song in songs[:-1]]` — Python slice `[:-1]` excludes the last element.
+5. Confident moment: the query returned 5 songs; only the return statement discarded the last one. Off-by-one at the slice, not in the query.
+
+**The root cause**
+
+`get_playlist_songs()` correctly queried and ordered all songs in the playlist, but the return statement used `songs[:-1]`, which slices off the final list element. A playlist with N songs always returned N−1. The last song by position was consistently dropped regardless of which song it was.
+
+**Fix and side-effect check**
+
+- **Change:** `return [song.to_dict() for song in songs]` — removed `[:-1]`.
+- **Why it works:** Returns the full query result without truncating.
+- **Side effects checked:** `test_playlist_returns_all_songs` (5 songs), `test_playlist_returns_songs_in_order`, and `test_empty_playlist_returns_empty_list` all pass. `get_playlist()` and `create_playlist()` unchanged.
+- **Commit:** `9099728` — `fix: return all playlist songs including the last entry`
+
+---
+
+## Milestone 3 Checkpoint
+
+| Requirement | Status |
+|-------------|--------|
+| ≥ 3 bugs fixed | ✅ 5/5 |
+| Complete RCA per bug (5 fields) | ✅ Above |
+| One commit per fix | ✅ `d4cebf0`, `3a5b1ca`, `c61497b`, `6b2192e`, `9099728` |
+| Fixes verified | ✅ `pytest tests/` — 14 passed |
+| Regression test (stretch) | ✅ `tests/test_feed.py` |
 
 ---
 
 ## AI Tool Disclosure
 
-AI (Cursor) was used to:
-- Orient in the codebase and trace import/call chains
-- Run reproduction scripts against `main` branch code before documenting fixes
-- Draft and refine this submission document
+AI (Cursor) was used during this project:
+
+| Phase | How AI helped | What I verified myself |
+|-------|---------------|------------------------|
+| Orientation | Explained import graph and layer structure (`routes` → `services` → `models`) | Read `app.py`, `models.py`, and route files directly |
+| Issue #1 | Clarified `datetime.weekday()` returns 0=Monday, 6=Sunday | Read the `elif` branch and ran `test_streak_increments_on_sunday` |
+| Issue #3 | Explained why SQL joins multiply rows for multi-tag songs | Ran `.count()` on the raw query with 0 vs 3 tags |
+| Issue #4 | Suggested comparing `add_to_playlist` vs `rate_song` side-by-side | Read both functions in `notification_service.py` and confirmed the missing `create_notification` call |
+| Documentation | Drafted submission structure | Verified all reproduction steps and test results on `main` vs `bugfix/mixtape` |
+
+AI was **not** used to guess bug locations before reading the relevant service files. The workflow was: reproduce → read code → form hypothesis → verify with tests → fix.
 
 All fixes were verified by running `pytest tests/` (14 passed after fixes).
