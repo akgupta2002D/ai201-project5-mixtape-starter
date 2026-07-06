@@ -92,7 +92,9 @@ d4cebf0 fix: remove Sunday boundary that incorrectly resets listening streak
 7b64551 initial commit
 ```
 
-**Review:** Five separate `fix:` commits — one per bug. No bundled fixes. Docs and test commits are separate. *(Screenshot of `git log --oneline` attached separately.)*
+**Review:** Five separate `fix:` commits — one per bug. No bundled fixes. Docs and test commits are separate.
+
+![git log --oneline bugfix/mixtape](ss_gitlog.png)
 
 ### RCA completeness check
 
