@@ -1,5 +1,48 @@
 # Mixtape Bug Hunt — Submission
 
+## AI Usage
+
+I used Cursor (AI) throughout this project, primarily for **codebase navigation and debugging support** — not for writing fixes blindly. Below is an honest account of what worked, what didn't, and what I still had to verify myself.
+
+### Codebase orientation (Milestone 1)
+
+- **Asked AI:** "What modules handle interactions between files in this repo?" and "How does the rating flow work end-to-end?"
+- **What it helped with:** Quickly mapped the `routes/` → `services/` → `models.py` layering and identified that bugs live in `services/`. Suggested tracing features from routes downward rather than jumping straight into service files.
+- **What I verified myself:** Read `app.py`, `models.py`, and each route file to confirm the call chains. Used `pydeps app.py` to generate an import diagram (had to work around the hyphenated folder name by running from inside the project).
+- **Where AI was incomplete:** AI initially suggested `pipdeptree` for internal module interactions — that's for installed packages, not app file structure. I switched to reading imports with `grep` and `pydeps`.
+
+### Bug reproduction (Milestone 2)
+
+- **Asked AI:** How to run failing tests against unfixed code; whether seed data contained the right conditions for each bug.
+- **What it helped with:** Identified that Issue #1 needs Saturday→Sunday dates, Issue #3 is conditional on multi-tag songs, and Issue #4's hint points to comparing two functions in the same file.
+- **What I verified myself:** Checked out `main` branch service files and ran `pytest` to confirm failures before writing any fix. For Issue #3, AI's initial claim that duplicates appear in `search_songs()` return values didn't reproduce with SQLAlchemy 2.x — I had to run `.count()` on the raw query to see 3 SQL rows for a 3-tag song vs 1 for a 0-tag song. The bug is real at the SQL level even when ORM deduplication masks it in some cases.
+
+### Investigation and debugging (Milestone 3)
+
+| Bug | What I asked AI | What AI got right | What I had to verify myself |
+|-----|-----------------|-------------------|----------------------------|
+| #1 Streak | "What does `weekday()` return for Sunday?" | Returns `6`; the `!= 6` guard blocks Sunday increments | Ran `test_streak_increments_on_sunday` — failed on `main`, passed after fix |
+| #2 Feed | "Why would a 24-hour window show stale listeners?" | Threshold too wide for "listening now" | Built minimal repro with 15-min vs 5-hour events; confirmed both appeared with 24h window |
+| #3 Search | "Why would duplicates be conditional?" | Join on `song_tags` multiplies rows per tag | Ran `.count()` on query — 3 rows for 3-tag song, 1 for 0-tag song |
+| #4 Notifications | "What's different between the two code paths?" | `add_to_playlist` calls `create_notification`, `rate_song` doesn't | Read both functions line-by-line in `notification_service.py`; called `rate_song` + `get_notifications` to confirm empty result |
+| #5 Playlist | Nothing — obvious from test failure | N/A | Test output showed 4 songs returned for 5-song playlist; found `songs[:-1]` in return statement |
+
+### What I did NOT use AI for
+
+- Choosing the fix itself — each fix was one targeted line or small block after I read the code
+- Committing without running tests — always ran `pytest tests/` after each fix
+- Skipping reproduction — every bug was confirmed on `main` before fixing
+
+### Workflow that worked
+
+```
+Reproduce on main → read the service file → form hypothesis → verify with test/shell → fix → pytest → document → commit
+```
+
+AI was most useful **after** I found the suspicious code, not before. Asking "where is the bug?" before reading the relevant file tended to produce plausible but wrong answers.
+
+---
+
 ## Codebase Map
 
 ### Main files and roles
@@ -31,9 +74,47 @@ Routes should stay thin; persistence and rules live in services.
 
 ---
 
-## Milestone 3: Root Cause Analyses
+## Milestone 4: Final Review
 
-All five bugs fixed on branch `bugfix/mixtape`, one commit each. Each entry below was written immediately after fixing that bug.
+### Commit history (`git log --oneline bugfix/mixtape`)
+
+```
+0d54b84 docs: add Milestone 3 full root cause analyses for all five bugs
+55f7d60 docs: add Milestone 2 bug reproduction steps to submission
+5e7e8cd docs: add bug hunt submission with codebase map and root cause analyses
+fac6337 test: add regression test for Friends Listening Now recency filter
+9099728 fix: return all playlist songs including the last entry
+6b2192e fix: notify song sharer when a friend rates their song
+c61497b fix: deduplicate search results when songs have multiple tags
+3a5b1ca fix: narrow Friends Listening Now window to exclude stale events
+d4cebf0 fix: remove Sunday boundary that incorrectly resets listening streak
+2dfdeaa Add .gitignore file and update README with setup instructions
+7b64551 initial commit
+```
+
+**Review:** Five separate `fix:` commits — one per bug. No bundled fixes. Docs and test commits are separate. *(Screenshot of `git log --oneline` attached separately.)*
+
+### RCA completeness check
+
+| Bug | Title | Reproduced | Found cause | Root cause | Fix + side effects |
+|-----|-------|:---:|:---:|:---:|:---:|
+| #1 | Streak resets on Sunday | ✅ | ✅ | ✅ | ✅ |
+| #2 | Stale "listening now" | ✅ | ✅ | ✅ | ✅ |
+| #3 | Search duplicates | ✅ | ✅ | ✅ | ✅ |
+| #4 | Missing rating notification | ✅ | ✅ | ✅ | ✅ |
+| #5 | Last playlist song missing | ✅ | ✅ | ✅ | ✅ |
+
+### Test verification
+
+```
+pytest tests/  →  14 passed
+```
+
+---
+
+## Root Cause Analyses
+
+All five bugs fixed on branch `bugfix/mixtape`, one commit each.
 
 ---
 
@@ -186,30 +267,12 @@ All five bugs fixed on branch `bugfix/mixtape`, one commit each. Each entry belo
 
 ---
 
-## Milestone 3 Checkpoint
+## Milestone 4 Checkpoint
 
 | Requirement | Status |
 |-------------|--------|
-| ≥ 3 bugs fixed | ✅ 5/5 |
-| Complete RCA per bug (5 fields) | ✅ Above |
-| One commit per fix | ✅ `d4cebf0`, `3a5b1ca`, `c61497b`, `6b2192e`, `9099728` |
-| Fixes verified | ✅ `pytest tests/` — 14 passed |
+| `git log` — ≥ 3 separate `fix:` commits | ✅ 5 fix commits |
+| All RCA entries complete (5 fields each) | ✅ |
+| AI usage section at top of doc | ✅ |
+| All tests pass | ✅ 14/14 |
 | Regression test (stretch) | ✅ `tests/test_feed.py` |
-
----
-
-## AI Tool Disclosure
-
-AI (Cursor) was used during this project:
-
-| Phase | How AI helped | What I verified myself |
-|-------|---------------|------------------------|
-| Orientation | Explained import graph and layer structure (`routes` → `services` → `models`) | Read `app.py`, `models.py`, and route files directly |
-| Issue #1 | Clarified `datetime.weekday()` returns 0=Monday, 6=Sunday | Read the `elif` branch and ran `test_streak_increments_on_sunday` |
-| Issue #3 | Explained why SQL joins multiply rows for multi-tag songs | Ran `.count()` on the raw query with 0 vs 3 tags |
-| Issue #4 | Suggested comparing `add_to_playlist` vs `rate_song` side-by-side | Read both functions in `notification_service.py` and confirmed the missing `create_notification` call |
-| Documentation | Drafted submission structure | Verified all reproduction steps and test results on `main` vs `bugfix/mixtape` |
-
-AI was **not** used to guess bug locations before reading the relevant service files. The workflow was: reproduce → read code → form hypothesis → verify with tests → fix.
-
-All fixes were verified by running `pytest tests/` (14 passed after fixes).
